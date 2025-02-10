@@ -1,4 +1,4 @@
-# from backend.phi_search_agent import search_and_display
+from phi_search_agent import search_and_display
 from duckduckgo_search import DDGS
 import requests
 from bs4 import BeautifulSoup
@@ -16,16 +16,26 @@ import os
 def extract_text_from_url(url):
     """Extract main text content from a URL."""
     try:
-        # Download with httpx and timeout
-        with httpx.Client() as client:
-            response = client.get(url, timeout=20)
+        # Add timeout and headers to appear more like a browser
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        with httpx.Client(timeout=20) as client:
+            response = client.get(url, headers=headers)
+            response.raise_for_status()  # Raise an error for bad status codes
             downloaded = response.text
             # Extract text content
             text = trafilatura.extract(downloaded, include_links=False, include_images=False)
-            return text if text else "Unable to extract content"
+            if not text:
+                return "Error: No content could be extracted from the webpage"
+            return text
+    except httpx.TimeoutException:
+        return "Error: Request timed out"
+    except httpx.HTTPStatusError as e:
+        return f"Error: HTTP {e.response.status_code}"
     except Exception as e:
-        return f"Error accessing URL: {str(e)}"
-    
+        return f"Error: {str(e)}"
+
 def filter_documents(texts, embedding_model):
     embeddings_filter = EmbeddingsClusteringFilter(
         embeddings=embedding_model,
@@ -64,7 +74,7 @@ def summarize_document(texts, llm, embedding_model):
     return summary
 
 def ask_followup_question(content, llm):
-    """Handle follow-up questions about the content."""
+    """Handle follow-up questions about the content.""" 
     while True:
         question = input("\nAsk a follow-up question (or 'next' to move to next result, 'quit' to exit): ")
         if question.lower() in ['next', 'quit']:
@@ -121,7 +131,6 @@ def process_search_results():
     query = input("Enter your search query (or 'quit' to exit): ")
     if query.lower() == 'quit':
         return False
-    
     
     ddgs = DDGS()
     
@@ -190,4 +199,4 @@ if __name__ == "__main__":
         should_continue = process_search_results()
         if not should_continue:
             print("Goodbye!")
-            break 
+            break
