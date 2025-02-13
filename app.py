@@ -4,14 +4,19 @@ from link_summarizer import (
     extract_text_from_url,
     filter_documents,
     summarize_document,
-    DDGS
+    DDGS,llm,PromptTemplate,load_summarize_chain
 )
+from langchain.docstore.document import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import SentenceTransformerEmbeddings
-from langchain_community.chat_models.sambanova import ChatSambaNovaCloud
 import os
 import logging
 from datetime import datetime
+from chat_agent import ChatAgent
+import asyncio
+from functools import wraps
+from langchain_community.chat_models.sambanova import ChatSambaNovaCloud
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -23,33 +28,35 @@ CORS(app, resources={
     r"/*": {
         "origins": ["http://localhost:5173", "http://127.0.0.1:5173"],
         "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"]
+        "allow_headers": ["Content-Type", "Authorization"],
+        "expose_headers": ["Content-Type"],
+        "supports_credentials": True
     }
 })
 
 @app.after_request
 def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Origin', 'http://localhost:5173')
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+    response.headers.add('Access-Control-Allow-Credentials', 'true')
     return response
 
 # Initialize models and configurations
 embedding_model = SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
-sambanova_api_key = "540f8914-997e-46c6-829a-ff76f5d4d265"  
-os.environ["SAMBANOVA_API_KEY"] = sambanova_api_key
-
-llm = ChatSambaNovaCloud(
-    model="llama3-70b",
-    temperature=0.6,
-    max_tokens=4000,
-    sambanova_api_key=sambanova_api_key
-)
-
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1000,
     chunk_overlap=200
 )
+
+# Initialize chat agent
+chat_agent = ChatAgent()
+
+def async_route(f):
+    @wraps(f)
+    def wrapped(*args, **kwargs):
+        return asyncio.run(f(*args, **kwargs))
+    return wrapped
 
 @app.route('/search', methods=['POST'])
 def search():
@@ -62,7 +69,9 @@ def search():
 
         logger.info(f"Processing search query: {query}")
         ddgs = DDGS()
-        results = list(ddgs.text(query, max_results=5))
+        
+        # Get more results initially to account for potential failures
+        results = list(ddgs.text(query, max_results=10))
         
         if not results:
             return jsonify({
@@ -75,8 +84,13 @@ def search():
             }), 404
         
         processed_results = []
+        successful_texts = []
+        required_summaries = 5
         
         for result in results:
+            if len([r for r in processed_results if r['status'] == 'success']) >= required_summaries:
+                break
+                
             try:
                 url = result['href']
                 title = result['title']
@@ -95,6 +109,7 @@ def search():
                         'status': 'failed',
                         'error': content
                     })
+                    # Try next URL if this one failed
                     continue
                     
                 # Split text into chunks
@@ -117,6 +132,8 @@ def search():
                     'key_points': key_points
                 })
                 
+                successful_texts.extend(texts)
+                
             except Exception as e:
                 logger.error(f"Error processing result: {str(e)}")
                 processed_results.append({
@@ -128,14 +145,77 @@ def search():
                 })
                 continue
 
-        # Generate cumulative summary
+        # If we don't have enough successful summaries, try to get more results
+        if len([r for r in processed_results if r['status'] == 'success']) < required_summaries:
+            try:
+                # Try to get more results
+                more_results = list(ddgs.text(query, max_results=15))
+                for result in more_results[10:]:  # Start from where we left off
+                    if len([r for r in processed_results if r['status'] == 'success']) >= required_summaries:
+                        break
+                    try:
+                        url = result['href']
+                        title = result['title']
+                        snippet = result.get('body', '')
+                        
+                        logger.info(f"Analyzing URL: {url}")
+                        
+                        # Extract content from URL
+                        content = extract_text_from_url(url)
+                        if content.startswith("Error"):
+                            logger.error(f"Could not process URL: {content}")
+                            processed_results.append({
+                                'url': url,
+                                'title': title,
+                                'snippet': snippet,
+                                'status': 'failed',
+                                'error': content
+                            })
+                            continue
+                            
+                        # Split text into chunks
+                        texts = text_splitter.create_documents([content])
+                        
+                        # Generate summary for this specific URL
+                        logger.info(f"Generating summary for: {title}")
+                        summary = summarize_document(texts, llm, embedding_model)
+                        
+                        # Extract key points for this summary
+                        key_points = extract_key_points(summary['output_text'])
+                        
+                        # Add to processed results
+                        processed_results.append({
+                            'url': url,
+                            'title': title,
+                            'snippet': snippet,
+                            'status': 'success',
+                            'summary': summary['output_text'],
+                            'key_points': key_points
+                        })
+                        
+                        successful_texts.extend(texts)
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing result: {str(e)}")
+                        processed_results.append({
+                            'url': url,
+                            'title': title,
+                            'snippet': snippet,
+                            'status': 'failed',
+                            'error': str(e)
+                        })
+                        continue
+            except Exception as e:
+                logger.error(f"Error getting additional results: {str(e)}")
+
+        # Generate cumulative summary if we have successful texts
         cumulative_summary = None
-        try:
-            if texts:
+        if successful_texts:
+            try:
                 logger.info("Generating cumulative summary...")
-                cumulative_summary = summarize_document(texts, llm, embedding_model)
-        except Exception as e:
-            logger.error(f"Error generating cumulative summary: {str(e)}")
+                cumulative_summary = summarize_document(successful_texts, llm, embedding_model)
+            except Exception as e:
+                logger.error(f"Error generating cumulative summary: {str(e)}")
 
         # Organize the response
         response = {
@@ -224,6 +304,77 @@ def ask_question():
             'error': str(e),
             'status': 'error',
             'message': 'An error occurred while processing your question'
+        }), 500
+
+@app.route('/chat', methods=['POST', 'OPTIONS'])
+@async_route
+async def chat():
+    """
+    Handle general chat conversations with the AI.
+    """
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    try:
+        data = request.get_json()
+        message = data.get('message')
+        context = data.get('context', {})
+
+        if not message:
+            return jsonify({'error': 'No message provided'}), 400
+
+        # Process the message using the chat agent
+        response = await chat_agent.process_message(message, context)
+        
+        if not response['success']:
+            return jsonify({
+                'error': 'Failed to process message',
+                'details': response.get('error', 'Unknown error')
+            }), 500
+        
+        # Generate suggestions for follow-up questions
+        suggestions = await chat_agent.generate_suggestions(message)
+        
+        # Add suggestions to the response
+        response['suggestions'] = suggestions
+
+        return jsonify(response)
+
+    except Exception as e:
+        app.logger.error(f"Error in chat endpoint: {str(e)}")
+        return jsonify({
+            'error': 'An error occurred while processing your request',
+            'details': str(e)
+        }), 500
+
+@app.route('/chat/history', methods=['GET'])
+def get_chat_history():
+    """
+    Get the current chat history.
+    """
+    try:
+        history = chat_agent.get_chat_history()
+        return jsonify({'history': history})
+    except Exception as e:
+        app.logger.error(f"Error getting chat history: {str(e)}")
+        return jsonify({
+            'error': 'An error occurred while retrieving chat history',
+            'details': str(e)
+        }), 500
+
+@app.route('/chat/clear', methods=['POST'])
+def clear_chat_history():
+    """
+    Clear the chat history.
+    """
+    try:
+        chat_agent.clear_history()
+        return jsonify({'message': 'Chat history cleared successfully'})
+    except Exception as e:
+        app.logger.error(f"Error clearing chat history: {str(e)}")
+        return jsonify({
+            'error': 'An error occurred while clearing chat history',
+            'details': str(e)
         }), 500
 
 def extract_key_points(text):
