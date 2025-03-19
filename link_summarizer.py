@@ -5,7 +5,7 @@ from bs4 import BeautifulSoup
 import trafilatura
 import httpx
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.document_transformers import EmbeddingsClusteringFilter
 from langchain.docstore.document import Document
 from langchain.chains.summarize import load_summarize_chain
@@ -15,7 +15,7 @@ import os
 import time
 
 
-sambanova_api_key = "540f8914-997e-46c6-829a-ff76f5d4d265"  # Replace with your actual API key
+sambanova_api_key = "540f8914-997e-46c6-829a-ff76f5d4d265"  
 os.environ["SAMBANOVA_API_KEY"] = sambanova_api_key
         
 llm = ChatSambaNovaCloud(

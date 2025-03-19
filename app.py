@@ -149,8 +149,8 @@ def search():
         if len([r for r in processed_results if r['status'] == 'success']) < required_summaries:
             try:
                 # Try to get more results
-                more_results = list(ddgs.text(query, max_results=15))
-                for result in more_results[10:]:  # Start from where we left off
+                more_results = list(ddgs.text(query, max_results=5))
+                for result in more_results[5:]:  # Start from where we left off
                     if len([r for r in processed_results if r['status'] == 'success']) >= required_summaries:
                         break
                     try:
